@@ -7,6 +7,8 @@ library(caret)
 library(randomForest)
 
 # ------------- Initial Load
+download.file("https://github.com/Markus-SJ/FreeProject/blob/main/emptyboard.png"
+              , "./emptyboard.png")
 king_rook <- read.csv("https://archive.ics.uci.edu/ml/machine-learning-databases/chess/king-rook-vs-king/krkopt.data", header=FALSE)
 colnames(king_rook) <- c('w_king_file','w_king_rank','w_rook_file','w_rook_rank',
                          'b_king_file','b_king_rank','result')
