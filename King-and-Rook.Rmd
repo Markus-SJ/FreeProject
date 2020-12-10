@@ -1,0 +1,235 @@
+---
+title: "King and Rook vs lone King Endgames"
+author: "Marcos A. Gonzalez"
+date: "12/10/2020"
+output: 
+  pdf_document: default
+  html_document: default
+always_allow_html: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(randomForest)) install.packages("randomForest", repos = "http://cran.us.r-project.org")
+
+library(tidyverse)
+library(caret)
+library(randomForest)
+```
+
+# Introduction
+
+In this project I analyze the starting position of a very specific endgame in chess: White King + White Rook versus lone Black King. Depending on the initial position of the pieces the possible results of the game are as follows:
+
+* White wins after zero moves because Black is already in checkmate
+* White wins after one or more moves with optimal play
+* Black draws (ties) after one or more moves with optimal play
+
+The question is, can we predict the outcome of the game given the initial positions of the pieces as predictors?
+
+I explore the possibility to predict the outcome of the game using the initial position of the pieces as predictors. Note how I don't attempt to determine the series of moves needed to win or draw but only predict the outcome (either draw or the number of moves needed to win) based on the initial position of the pieces.  
+
+
+# Analysis
+## The Dataset
+
+This dataset is available at (https://archive.ics.uci.edu/ml/datasets/Chess+%28King-Rook+vs.+King%29). It includes the initial positions of each piece in this particular endgame using algebraic notation.
+
+**Algebraic notation:** In chess the board is divided in 'files' (columns from a to h) and 'ranks' (rows from 1 to 8). The intersection of a file and a rank uniquely identifies each of the 64 squares. See the following figure (white king is on _d3_ and white rook is on _f5_):
+
+!["A chessboard with algebraic notation examples"]("./emptyboard.png")
+\ 
+
+**Partitioning the Data**  
+
+The following block of code loads the dataset, assigns column names to the set, and converts the $result$ column to a Factor. Also, we show its first few rows:  
+
+```{r InitiateData}
+king_rook <- read.csv("https://archive.ics.uci.edu/ml/machine-learning-databases/chess/king-rook-vs-king/krkopt.data", header=FALSE)
+colnames(king_rook) <- c('w_king_file','w_king_rank','w_rook_file','w_rook_rank',
+                         'b_king_file','b_king_rank','result')
+king_rook$result <- as.factor(king_rook$result) 
+head(king_rook)
+```
+
+The first two columns in the dataset represent the square where the white king is standing (file and rank respectively), the following two columns represent white rook's position, and the following two are the black king's position. The last column is the outcome of the game from this position obtained using chess playing engines, table bases, and other methods.  
+
+All observations in the dataset assume it's black to move. For example, the first observation of the dataset represents the white king on 'a1', a white rook on 'b3', and the black king on 'c2'. The game's observed outcome from this position is 'draw'.  
+
+Other outcomes include the number of moves needed (0, 1,..,16) in order to win the game with optimal play. The distribution of outcomes is shown in the following plot:  
+
+```{r OutcomeDistribution, warning=FALSE}
+king_rook %>%
+  group_by(result) %>% 
+  summarize(freq=n()) %>%
+  mutate(result = reorder(result, freq)) %>%
+  ggplot(aes(result, freq))+
+  geom_bar(stat = "identity", color="turquoise") +
+  theme(axis.text.x = element_text(angle = 90))
+```
+
+
+# Method
+
+This is a classification problem, since we are trying to determine one of many outcomes based on the predictors. I'm going to use knn and random forests methods.  
+
+We first partition the data in training and test datasets. Training set is 80% of the total dataset. In turn, I partition the training set in 80% for actual training and 20% for cross validation.
+
+```{r seed1, eval=TRUE, echo=FALSE, warning=FALSE}
+set.seed(2021, sample.kind = "Rounding")
+```
+
+```{r testing}
+test_index <- createDataPartition(king_rook$result, times=1, p=0.8, list=FALSE)
+testing  <- king_rook[-test_index,]
+whats_left <- king_rook[test_index,]
+```
+This has created the __testing__ set with 20% of the total data. Next we assign 80% of the remaining data to the __training__ set:
+
+```{r seed2, eval=TRUE, echo=FALSE, warning=FALSE}
+set.seed(2021, sample.kind = "Rounding")
+```
+
+```{r trainig}
+train_index <- createDataPartition(whats_left$result, times=1, p=0.8, list=FALSE)
+training <- whats_left[train_index,]
+```
+
+Finally we assign the remaining to the __cross validation__ data set:
+
+```{r crossval}
+cross_val <- whats_left[-train_index,]
+num_col <- ncol(king_rook)
+```
+
+## Using KNN
+KNN is susceptible to the tuning of the $k$ parameter. Therefore, I apply several values of $k$ to a function that trains a KNN model on the training data and obtains the value of k with the best accuracy.
+I'm using all 6 predictors in the definition of the training function:
+```{r knn_function}
+seq <- 2:25
+knn_k <- function(k) {
+  knn_fit <- knn3(result ~
+                  w_king_file + w_king_rank
+                + w_rook_file + w_rook_rank
+                + b_king_file + b_king_rank
+                ,data = training
+                ,k=k)
+  knn_hat <- predict(knn_fit, cross_val, type="class")
+  confusionMatrix(knn_hat, cross_val$result)$overall["Accuracy"]
+}
+```
+
+```{r seed3, eval=TRUE, echo=FALSE, warning=FALSE}
+set.seed(2021, sample.kind = "Rounding")
+```
+
+```{r knning}
+knn_accuracy <- sapply(seq, knn_k)
+plot(seq, knn_accuracy)
+seq[which.max(knn_accuracy)]
+max(knn_accuracy)
+```
+
+This method offers an accuracy of `r max(knn_accuracy)` even at the best value of k=`r seq[which.max(knn_accuracy)]`.  
+
+## Using Random Forests
+Random forest are very good at classifying so I decided to see how well this method would be able to predict the outcome. Also, this method allows for more tuning parameters to be set.  
+
+**Tuning mtry**  
+
+First, I train my $mtry$ parameter to see what is a good value for later use in the final model's tuning grid:  
+
+```{r seed4, eval=TRUE, echo=FALSE, warning=FALSE}
+set.seed(2021, sample.kind = "Rounding")
+```
+```{r trainMtry}
+trainMtry <- tuneRF(training[, -num_col]
+                    , training$result
+                    , stepFactor = 1.5
+                    , improve = 0.05
+                    , ntree = 250)
+trainMtry
+best_mtry <- 6
+```
+
+This table shows the result of using the function _tuneRF_ on the training data. The method will stop processing and show the table with values once it is unable to get an improvement of $0.05$ from the previous step.  
+
+According to the documentation the lower the _OOBError_ value the better the mtry. In our case this happens at $mtry = 6$. That's the best parameter for our model.  
+
+**Tuning ntree**  
+
+The other tuning parameter we can try is the number of trees, $ntree$. Here, we will try different values ranging from 1000 to 2000 in increments of 250. This step might take several minutes to run:
+
+```{r ntreeing, warning=FALSE, message=FALSE}
+temp_mod <- list()
+grid <- data.frame(mtry = c(best_mtry))
+for (n in c(1000, 1250, 1500, 1750, 2000)) {
+  set.seed(2021, sample.kind = "Rounding")
+  train_rf <-  train(training[, -num_col], training$result, method = "rf",
+                   metric = "Accuracy",
+                   trControl = trainControl(method="cv", number = 6),
+                   tuneGrid = grid,
+                   ntree = n
+                   )
+  temp_mod[[toString(n)]] <- train_rf
+}
+model_results <- resamples(temp_mod)
+summary(model_results)
+best_ntree <- 1250
+```
+
+The loop above saves into a list several objects of class _train_ -one for each possible value of ntree- and formats it for easy analysis and visualization using the _resamples_ function.  
+
+We see that the best value of $Accuracy=0.8333890$ happens at $ntree=1250$. This is the value we are using in the final model.
+
+
+__Final Model__  
+
+Now for the final model, I train using the obtained values of mtry and ntree:
+
+```{r final, warning=FALSE, message=FALSE}
+grid <- data.frame(mtry = c(best_mtry))
+set.seed(2021, sample.kind = "Rounding")
+train_rf <-  train(training[, -num_col], 
+                   training$result, 
+                   method = "rf", 
+                   metric = "Accuracy",
+                   trControl = trainControl(method = "cv", number = 6),
+                   tuneGrid = grid,
+                   ntrees = best_ntree
+                   )
+```
+
+Now we are going to try this on the test set.
+
+# Result
+Let's now use the _predict_ function on the testing dataset using the final model:
+
+```{r predicting}
+sv <- predict(train_rf, testing, type = "raw")
+mean(sv == testing$result)
+```
+
+The PREDICT function achieves over 0.84 accuracy with this model. A surprisingly higher accuracy than KNN.  
+
+
+# Conclusion
+I didn't expect this result. Based only on the initial position of the pieces and without any type of analysis of the position itself, without using chess playing engines, nor feeding previous chess knowledge to the model, I expected the prediction to be no more than 70-75 percent accurate at best, given that the KNN method achieved poor results.  
+
+The bulk of the time creating this report was spent tweaking with the _trainControl_ and _tuneGrid_ objects, trying to adjust them to produce the best mtry and ntree values. 
+
+Does this result indicate that there are predictive methods of evaluating a chess position and determining what's the outcome without the need to analyze the position with engines? If the answer is yes, then this kind of predictive pre-analysis could improve a chess engine performance while saving precious time by selecting the appropriate path to winning/drawing without having to analyzing chess lines that don't secure the best outcome.  
+
+
+I think this approach deserves further analysis to decide one way or the other.
+
+# References
+The following were used as reference to produce this report:
+
+* Formatting R Markdown - https://rstudio.com/wp-content/uploads/2015/02/rmarkdown-cheatsheet.pdf
+* Markdown chunks of code - https://bookdown.org/yihui/rmarkdown/r-code.html
+* Caret package - https://topepo.github.io/caret/index.html
+* Cross validation - https://rafalab.github.io/dsbook/cross-validation.html
+* Considerations for a neuronal newtwork to analyze chess positions - https://core.ac.uk/download/pdf/12756.pdf
